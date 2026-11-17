@@ -1761,7 +1761,7 @@ class Ventana : Flotante
                 camino.AddString(GLIFO_SOL, familia, (int)FontStyle.Regular, tam, PointF.Empty, StringFormat.GenericTypographic);
                 // Lo centramos y lo ajustamos al cuadro según el contorno real del glifo.
                 RectangleF b = camino.GetBounds();
-                float factor = tam * 0.94f / Math.Max(b.Width, b.Height);
+                float factor = tam * 0.88f / Math.Max(b.Width, b.Height);
                 using (var m = new Matrix())
                 {
                     m.Translate(tam / 2f, tam / 2f);
@@ -1769,7 +1769,11 @@ class Ventana : Flotante
                     m.Translate(-(b.Left + b.Width / 2), -(b.Top + b.Height / 2));
                     camino.Transform(m);
                 }
-                using (var pincel = new SolidBrush(barraClara ? Color.Black : Color.White)) g.FillPath(pincel, camino);
+                // El glifo de brillo tiene trazos más finos que los del parlante o la red:
+                // le sumamos un contorno para que quede del mismo peso que los demás iconos.
+                Color color = barraClara ? Color.Black : Color.White;
+                using (var pincel = new SolidBrush(color)) g.FillPath(pincel, camino);
+                using (var lapiz = new Pen(color, tam * 0.04f) { LineJoin = LineJoin.Round }) g.DrawPath(lapiz, camino);
             }
             IntPtr h = bmp.GetHicon();
             try { using (var temporal = Icon.FromHandle(h)) return (Icon)temporal.Clone(); }
