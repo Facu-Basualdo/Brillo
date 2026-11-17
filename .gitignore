@@ -1,0 +1,7 @@
+# Resultado de compilar (se distribuye por Releases, no en el repo)
+*.exe
+*.pdb
+
+# Windows
+Thumbs.db
+desktop.ini
