@@ -6,24 +6,55 @@ Un programa chico para Windows que cambia el brillo de tus pantallas desde un ic
 - Funciona con **monitores externos** (por DDC/CI) y con la **pantalla de la laptop**.
 - Atajo de teclado global para abrirlo (por defecto **Ctrl + Alt + B**).
 - Tema claro u oscuro y el color de énfasis de Windows.
-- Un solo `.exe` de unos 60 KB. No necesita instalación ni permisos de administrador.
+- Instalador de un solo archivo, sin permisos de administrador. También se puede usar el `.exe` suelto, sin instalar.
 
 ## Requisitos
 
 - Windows 10 u 11.
 - .NET Framework 4 (ya viene con Windows).
 
-## Cómo conseguirlo
+## Instalarlo
 
-Compilalo con el compilador de C# que trae Windows (no hace falta Visual Studio):
+Abrí **`Instalar Brillo.exe`** y elegí:
+
+- **Iniciar con Windows**: arranca oculto, con el icono junto al reloj (viene activado).
+- **Acceso directo en el escritorio** (en el menú Inicio se crea siempre).
+
+Se instala solo para tu usuario, en `%LOCALAPPDATA%\Programs\Brillo`, sin pedir permisos de administrador. Al terminar, Brillo queda abierto.
+
+Para actualizarlo, abrí el instalador nuevo: cierra la versión abierta y la reemplaza, sin perder las opciones.
+
+Para desinstalarlo: *Configuración de Windows > Aplicaciones > Aplicaciones instaladas > Brillo > Desinstalar*. Se borran el programa, los accesos directos, el inicio automático y las opciones.
+
+### La primera vez que lo abrís
+
+El instalador no está firmado digitalmente (un certificado cuesta plata), así que Windows desconfía:
+
+- **"Windows protegió tu PC"** (SmartScreen): tocá *Más información* y después *Ejecutar de todas formas*.
+- **"Una directiva de Control de aplicaciones bloqueó este archivo"** (Smart App Control): este bloqueo no tiene botón para saltearlo. Solo se puede instalar desactivando Smart App Control en *Seguridad de Windows > Control de aplicaciones y navegador* (ojo: según la versión de Windows, una vez apagado puede que no se pueda volver a prender sin reinstalar Windows).
+
+Además, Windows 11 esconde los iconos nuevos de la barra de tareas: si no ves el sol junto al reloj, tocá la flechita **^** y arrastralo afuera. También se abre con **Ctrl + Alt + B**.
+
+## Compilarlo
+
+Con el compilador de C# que trae Windows (no hace falta Visual Studio):
 
 ```bat
 compilar.bat
 ```
 
-Eso genera `Brillo.exe` en la misma carpeta. Copialo donde quieras y ejecutalo.
+Genera `Brillo.exe` y `Instalar Brillo.exe` (que lleva a `Brillo.exe` adentro). Para pasárselo a alguien alcanza con `Instalar Brillo.exe`. Algunos servicios de mail no dejan adjuntar `.exe` (ni dentro de un `.zip`): en ese caso, compartilo por Google Drive, OneDrive o un *Release* de GitHub.
 
-> Si Windows dice que "una directiva de Control de aplicaciones bloqueó este archivo" (Smart App Control), compilá de nuevo: cada compilación genera un archivo distinto y casi siempre la segunda pasa.
+> Si en tu PC Smart App Control bloquea un `.exe` recién compilado, compilá de nuevo: cada compilación genera un archivo distinto y casi siempre alguna pasa.
+
+### Paquete para la Microsoft Store
+
+```bat
+powershell -ExecutionPolicy Bypass -File herramientas\bajar-sdk.ps1   :: solo la primera vez (baja makeappx y makepri)
+empaquetar.bat
+```
+
+Genera `tienda\Brillo.msix`, que se sube al Centro de partners. La Store lo firma, así que quien lo instala desde ahí no ve avisos de seguridad. En esa versión, *Iniciar con Windows* viene apagado y Brillo lo pregunta la primera vez que se abre.
 
 ## Uso
 
@@ -51,6 +82,7 @@ En *Configuración* se elige el atajo, el paso, el tema, si se muestra el contro
 Brillo.exe            :: abre el icono y la ventana
 Brillo.exe --oculto   :: solo el icono (así lo abre el inicio automático)
 Brillo.exe 40         :: pone todas las pantallas al 40 % y sale
+Brillo.exe --desinstalar  :: desinstala (es lo que usa Windows desde "Aplicaciones instaladas")
 ```
 
 El último sirve para crear accesos directos o tareas programadas (por ejemplo, bajar el brillo a la noche).
@@ -78,10 +110,12 @@ Si una pantalla está conectada pero no se puede ajustar, Brillo lo dice al pie 
 
 ## Dónde guarda las cosas
 
+- Programa (si lo instalaste): `%LOCALAPPDATA%\Programs\Brillo\Brillo.exe`.
 - Opciones: `HKEY_CURRENT_USER\Software\Brillo`.
 - Inicio automático: el valor `Brillo` en `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run`.
+- Entrada de desinstalación: `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\Brillo`.
 
-Para desinstalarlo: desactivá *Iniciar con Windows*, cerralo, borrá el `.exe` y, si querés, la clave del registro.
+Si usás el `.exe` suelto (sin instalar), para sacarlo: desactivá *Iniciar con Windows*, cerralo, borrá el `.exe` y, si querés, la clave de opciones.
 
 > Las versiones anteriores se llamaban *BrilloMonitor*. La primera vez que abrís `Brillo.exe`, pasa solas las opciones y el inicio automático al nombre nuevo.
 

@@ -10,11 +10,13 @@ Programa chico para Windows que ajusta el brillo de las pantallas desde un icono
 
 ## Archivos
 
-- `Brillo.cs`: todo el código (un único archivo).
-- `compilar.bat`: compila `Brillo.exe` con `csc.exe` de .NET Framework 4 (`%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe`), que ya viene con Windows. No hay proyecto, NuGet ni SDK. Usa `/codepage:65001` porque `Brillo.cs` está en UTF-8 sin BOM.
-- `Brillo.exe`: el resultado compilado.
-- `README.md` (para usuarios) y `LICENSE` (MIT). Si cambia algo visible para el usuario (atajos, opciones, avisos), actualizar el README.
-- `README.md` (para usuarios, en español) y `LICENSE` (MIT).
+- `Brillo.cs`: todo el código del programa.
+- `Instalador.cs`: la ventana del instalador. Se compila **junto con** `Brillo.cs` (reusa `Tema`, `Dpi`, `Native`, `Config`, `Instalacion` y `Flotante.Rellenar/Bordear`) con `/define:INSTALADOR` (para que no se dupliquen los atributos de ensamblado) y `/main:ProgramaInstalador`.
+- `compilar.bat`: compila `Brillo.exe` y después `Instalar Brillo.exe` (que lleva `Brillo.exe` adentro con `/resource:Brillo.exe,Brillo.exe`) con `csc.exe` de .NET Framework 4 (`%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe`), que ya viene con Windows. No hay proyecto, NuGet ni SDK. Usa `/codepage:65001` porque los `.cs` están en UTF-8 sin BOM. El `.bat` tiene que quedar en CRLF y sin tildes (si no, `cmd` lo lee mal).
+- `empaquetar.bat` + `tienda\`: versión para la **Microsoft Store** (paquete MSIX, que la Store firma sola). Compila `Brillo.cs` con `/define:TIENDA` (referencia `Windows.ApplicationModel.winmd` y `Windows.Foundation.winmd` de `System32\WinMetadata`, más el facade `System.Runtime.dll`), copia `tienda\AppxManifest.xml` y `tienda\Assets\*.png`, arma `resources.pri` con `tienda\priconfig.xml` (sin `<packaging>`, para que quede un solo `.pri`) y genera `tienda\Brillo.msix`. `makeappx`/`makepri` vienen del paquete NuGet oficial `Microsoft.Windows.SDK.BuildTools`, que baja `herramientas\bajar-sdk.ps1` a `herramientas\sdk\` (no se sube). La identidad del manifiesto (`FacuBas.Brillo`, `CN=1198724E-…`, `FacuBas`) es la que asignó el Centro de partners: no cambiarla.
+- `brillo.ico`: icono de los dos `.exe` (`/win32icon`). El mismo script genera los logos de `tienda\Assets` (Square44x44 con `scale-*` y `targetsize-*`, Square150x150, StoreLogo). Se genera con `herramientas\crear-icono.ps1` (cuadrado redondeado azul con el glifo de brillo en blanco); solo hace falta correrlo para cambiar el diseño.
+- `Brillo.exe` / `Instalar Brillo.exe`: el resultado compilado (no se suben al repo).
+- `README.md` (para usuarios, en español) y `LICENSE` (MIT). Si cambia algo visible para el usuario (atajos, opciones, avisos, instalación), actualizar el README.
 
 ## Compilar
 
@@ -48,13 +50,18 @@ La PC tiene **Smart App Control** activado: a veces bloquea un `.exe` recién co
   - Teclado: flechas ±paso, RePág/AvPág ±10, Inicio/Fin, 1–9 = 10–90 %, 0 = 100 %, Tab cambia de fila, Esc cierra. Rueda: ±paso.
   - Atajo global (`RegisterHotKey`, por defecto Ctrl+Alt+B) para abrir y cerrar. Mientras el panel de configuración está abierto queda desregistrado, y se vuelve a registrar con el evento `Ocultada` del panel.
 - `PanelConfig` (hereda de `Flotante`): configuración con el mismo estilo. Cabecera con flecha para volver y tarjetas al estilo de Windows 11: atajo (clic y apretar la combinación; se prueba con `RegisterHotKey` antes de aceptarlo), paso (− / +), tema (segmentos), interruptores para "Todas las pantallas" e "Iniciar con Windows". Los cambios se aplican al instante con el `Action<Config>` que le pasa `Ventana`. Teclado: Tab o ↑↓ para moverse, ←→ para cambiar valores, Espacio/Enter para activar, Retroceso para volver, Esc para cerrar.
-- `Programa.Main`: instancia única mediante un `EventWaitHandle` llamado `Brillo_Mostrar`; una segunda copia llama a `AllowSetForegroundWindow` y le avisa a la primera que se muestre.
+- `Programa.Main`: instancia única mediante un `EventWaitHandle` llamado `Brillo_Mostrar`; una segunda copia llama a `AllowSetForegroundWindow` y le avisa a la primera que se muestre. También escucha `Brillo_Salir`: el instalador y el desinstalador lo usan para que la copia abierta se cierre sola (y saque bien su icono) antes de reemplazar o borrar el `.exe`.
+- `Instalacion` (en `Brillo.cs`): instalación **por usuario**, sin administrador. Copia a `%LOCALAPPDATA%\Programs\Brillo\Brillo.exe`, crea `Brillo.lnk` en el menú Inicio (y opcionalmente en el escritorio) con el COM `WScript.Shell` por reflexión, escribe el `Run` con la ruta instalada (`Config.CambiarInicio(bool, ruta)`) y la entrada `HKCU\...\Uninstall\Brillo` con `UninstallString = "Brillo.exe" --desinstalar`. `Desinstalar()` borra todo eso más `HKCU\Software\Brillo`, y el propio `.exe` lo borra un `cmd` unos segundos después. La versión está en `Instalacion.VERSION` (se usa también en los atributos de ensamblado y en "Aplicaciones instaladas").
+- `Tienda` (en `Brillo.cs`, solo con `TIENDA`): dentro del paquete el valor `Run` del registro no sirve, así que `Config.InicioActivado/CambiarInicio` usan la tarea de inicio `BrilloInicio` del manifiesto (`StartupTask`, viene apagada). Las operaciones asíncronas de WinRT se esperan revisando `Status` (sin `await`/`AsTask`, que pedirían el `Windows.winmd` del SDK). Los tipos de Windows van con nombre completo: un `using Windows.Foundation` choca con `Point`/`Size` de `System.Drawing`. Al abrirse por la tarea de inicio (`AppInstance.GetActivatedEventArgs().Kind == StartupTask`) arranca oculto. Como la Store no deja preguntar al instalar, la primera vez que se abre (`Config.PrimeraVez`, valor `Bienvenida`) pregunta si quiere iniciar con Windows. Sin `--desinstalar` ni migración de BrilloMonitor.
+- Versión: al publicar una nueva, subir `Instalacion.VERSION` y `Version` en `tienda\AppxManifest.xml` (formato `x.y.z.0`).
+- `VentanaInstalador` (en `Instalador.cs`): ventana normal (con barra de título del color de la cabecera vía DWM), mismo estilo que el resto: tarjetas con interruptores "Iniciar con Windows" (activado por defecto) y "Acceso directo en el escritorio", botones Cancelar / Instalar (o Actualizar si ya está instalado) y una pantalla final con instrucciones. Maneja `WM_DPICHANGED` para rehacer el diseño si se la mueve a otro monitor.
 
 ## Uso por línea de comandos
 
 - `Brillo.exe`: abre el icono y la ventana.
 - `Brillo.exe --oculto`: solo el icono (así lo lanza el inicio automático).
 - `Brillo.exe 40`: pone todas las pantallas al 40 % y sale (no usa la instancia única).
+- `Brillo.exe --desinstalar`: pregunta y desinstala (lo llama Windows desde "Aplicaciones instaladas").
 
 "Iniciar con Windows" escribe el valor `Brillo` en `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
 
@@ -66,4 +73,5 @@ La PC tiene **Smart App Control** activado: a veces bloquea un `.exe` recién co
 - Para ver la ventana: simular el atajo con `keybd_event` (Ctrl+Alt+B) desde PowerShell y capturar con `CopyFromScreen`, todo **en el mismo proceso** de PowerShell. Lanzarla con `Start-Process` o abrir un PowerShell nuevo le saca el foco y la ventana se esconde sola (es lo esperado). El proceso que captura tiene que llamar a `SetProcessDpiAwarenessContext(-4)` para que las coordenadas sean reales.
 - No simular clics del mouse: el usuario suele estar usando la PC al mismo tiempo.
 - Para ver el panel de configuración sin clics: compilar un `.exe` de prueba con `/main:` y una clase aparte que cree `PanelConfig`, le pase la config con `Cargar` y llame a `Mostrar()`. Generarlo dentro del repo (por Smart App Control), capturarlo y borrarlo.
+- Instalar o desinstalar en esta PC **cambia la configuración real del usuario** (mueve el `Run` a la ruta instalada; desinstalar borra `HKCU\Software\Brillo`). Preguntar antes, y si se prueba, respaldar esas claves y restaurarlas. Para ver solo la ventana del instalador: abrirlo, capturarlo y cerrarlo con `CloseMainWindow()` sin tocar "Instalar".
 - Después de probar, devolver el brillo al valor que tenía el usuario.

@@ -2,6 +2,11 @@
 *.exe
 *.pdb
 
+# Herramientas bajadas (herramientas\bajar-sdk.ps1) y paquete de la Microsoft Store (empaquetar.bat)
+herramientas/sdk/
+tienda/obj/
+*.msix
+
 # Windows
 Thumbs.db
 desktop.ini

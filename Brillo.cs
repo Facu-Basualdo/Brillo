@@ -3,6 +3,7 @@
 //   Brillo.exe          -> icono en la barra de tareas y ventana con un deslizador por pantalla
 //   Brillo.exe --oculto -> solo el icono (así lo lanza el inicio automático)
 //   Brillo.exe 40       -> pone todas las pantallas al 40% y sale (útil para accesos directos)
+//   Brillo.exe --desinstalar -> desinstala (lo llama Windows desde "Aplicaciones instaladas")
 
 using System;
 using System.Collections.Generic;
@@ -13,6 +14,14 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
+
+#if !INSTALADOR
+[assembly: System.Reflection.AssemblyTitle("Brillo")]
+[assembly: System.Reflection.AssemblyDescription("Ajusta el brillo de las pantallas desde la barra de tareas")]
+[assembly: System.Reflection.AssemblyProduct("Brillo")]
+[assembly: System.Reflection.AssemblyVersion(Instalacion.VERSION)]
+[assembly: System.Reflection.AssemblyFileVersion(Instalacion.VERSION)]
+#endif
 
 static class Native
 {
@@ -591,7 +600,7 @@ class Trabajador
 class Config
 {
     public const int MOD_ALT = 1, MOD_CONTROL = 2, MOD_SHIFT = 4, MOD_WIN = 8;
-    const string CLAVE = @"Software\Brillo";
+    public const string CLAVE = @"Software\Brillo";
     const string CLAVE_INICIO = @"Software\Microsoft\Windows\CurrentVersion\Run";
     const string NOMBRE_APP = "Brillo";
     const string CLAVE_VIEJA = @"Software\BrilloMonitor", NOMBRE_VIEJO = "BrilloMonitor";   // nombres de antes
@@ -635,7 +644,9 @@ class Config
 
     public static Config Cargar()
     {
-        Migrar();
+#if !TIENDA
+        Migrar();   // la versión de la Store nunca se llamó BrilloMonitor
+#endif
         var c = new Config();
         try
         {
@@ -677,6 +688,11 @@ class Config
         catch { }
     }
 
+#if TIENDA
+    // En la versión de la Microsoft Store el inicio automático es una "tarea de inicio" del paquete.
+    public static bool InicioActivado() { return Tienda.InicioActivado(); }
+    public static void CambiarInicio(bool activar) { Tienda.CambiarInicio(activar); }
+#else
     public static bool InicioActivado()
     {
         using (var k = Registry.CurrentUser.OpenSubKey(CLAVE_INICIO))
@@ -685,9 +701,31 @@ class Config
 
     public static void CambiarInicio(bool activar)
     {
+        CambiarInicio(activar, Application.ExecutablePath);
+    }
+#endif
+
+    // Marca guardada la primera vez que se abre (la versión de la Store pregunta ahí por el inicio automático).
+    public static bool PrimeraVez()
+    {
+        try
+        {
+            using (var k = Registry.CurrentUser.CreateSubKey(CLAVE))
+            {
+                if (k.GetValue("Bienvenida") != null) return false;
+                k.SetValue("Bienvenida", 1, RegistryValueKind.DWord);
+                return true;
+            }
+        }
+        catch { return false; }
+    }
+
+    // El instalador lo usa con la ruta del programa instalado (no con la suya).
+    public static void CambiarInicio(bool activar, string ejecutable)
+    {
         using (var k = Registry.CurrentUser.CreateSubKey(CLAVE_INICIO))
         {
-            if (activar) k.SetValue(NOMBRE_APP, "\"" + Application.ExecutablePath + "\" --oculto");
+            if (activar) k.SetValue(NOMBRE_APP, "\"" + ejecutable + "\" --oculto");
             else k.DeleteValue(NOMBRE_APP, false);
         }
     }
@@ -1050,7 +1088,7 @@ abstract class Flotante : Form
         return new Font(familia, px * escala, FontStyle.Regular, GraphicsUnit.Pixel);
     }
 
-    protected static GraphicsPath Redondeado(RectangleF r, float radio)
+    public static GraphicsPath Redondeado(RectangleF r, float radio)
     {
         var p = new GraphicsPath();
         float d = Math.Min(radio * 2, Math.Min(r.Width, r.Height));
@@ -1063,14 +1101,14 @@ abstract class Flotante : Form
         return p;
     }
 
-    protected static void Rellenar(Graphics g, RectangleF r, float radio, Color c)
+    public static void Rellenar(Graphics g, RectangleF r, float radio, Color c)
     {
         using (var b = new SolidBrush(c))
         using (var camino = Redondeado(r, radio))
             g.FillPath(b, camino);
     }
 
-    protected static void Bordear(Graphics g, RectangleF r, float radio, Color c, float grosor)
+    public static void Bordear(Graphics g, RectangleF r, float radio, Color c, float grosor)
     {
         var adentro = RectangleF.Inflate(r, -grosor / 2, -grosor / 2);
         using (var p = new Pen(c, grosor))
@@ -1258,7 +1296,7 @@ class Ventana : Flotante
         return libre;
     }
 
-    void Salir()
+    public void Salir()
     {
         Saliendo = true;
         panel.Saliendo = true;
@@ -2169,11 +2207,212 @@ class PanelConfig : Flotante
     }
 }
 
+// Instalación por usuario, sin permisos de administrador: el programa va a %LOCALAPPDATA%\Programs\Brillo,
+// con acceso directo en el menú Inicio y entrada en "Aplicaciones instaladas" de Windows.
+// La usan el instalador (Instalador.cs) y "Brillo.exe --desinstalar".
+static class Instalacion
+{
+    public const string VERSION = "1.0.0";
+    public const string EVENTO_SALIR = "Brillo_Salir";   // la copia abierta lo escucha y se cierra
+    const string CLAVE_DESINSTALAR = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\Brillo";
+
+    public static string Carpeta
+    {
+        get { return System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), @"Programs\Brillo"); }
+    }
+
+    public static string Ejecutable { get { return System.IO.Path.Combine(Carpeta, "Brillo.exe"); } }
+
+    static string AccesoMenu
+    {
+        get { return System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), "Brillo.lnk"); }
+    }
+
+    static string AccesoEscritorio
+    {
+        get { return System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "Brillo.lnk"); }
+    }
+
+    public static bool Instalado { get { return System.IO.File.Exists(Ejecutable); } }
+    public static bool TieneAccesoEscritorio { get { return System.IO.File.Exists(AccesoEscritorio); } }
+
+    // Le pide a la copia abierta que se cierre sola (así saca bien su icono de la bandeja).
+    // Si es una versión vieja que no entiende el aviso, la cierra a la fuerza.
+    public static void CerrarCopiaAbierta()
+    {
+        try
+        {
+            EventWaitHandle aviso;
+            if (EventWaitHandle.TryOpenExisting(EVENTO_SALIR, out aviso))
+                using (aviso) aviso.Set();
+        }
+        catch { }
+
+        int propio = System.Diagnostics.Process.GetCurrentProcess().Id;
+        DateTime limite = DateTime.Now.AddSeconds(5);
+        foreach (var p in System.Diagnostics.Process.GetProcessesByName("Brillo"))
+        {
+            if (p.Id == propio) continue;
+            try
+            {
+                int espera = (int)Math.Max(0, (limite - DateTime.Now).TotalMilliseconds);
+                if (!p.WaitForExit(espera)) { p.Kill(); p.WaitForExit(2000); }
+            }
+            catch { }
+        }
+    }
+
+    public static void Instalar(byte[] programa, bool alIniciar, bool escritorio)
+    {
+        CerrarCopiaAbierta();
+        System.IO.Directory.CreateDirectory(Carpeta);
+        System.IO.File.WriteAllBytes(Ejecutable, programa);
+
+        CrearAcceso(AccesoMenu);
+        if (escritorio) CrearAcceso(AccesoEscritorio);
+        else Borrar(AccesoEscritorio);
+
+        Config.CambiarInicio(alIniciar, Ejecutable);
+
+        using (var k = Registry.CurrentUser.CreateSubKey(CLAVE_DESINSTALAR))
+        {
+            k.SetValue("DisplayName", "Brillo");
+            k.SetValue("DisplayVersion", VERSION);
+            k.SetValue("DisplayIcon", Ejecutable);
+            k.SetValue("Publisher", "Brillo");
+            k.SetValue("InstallLocation", Carpeta);
+            k.SetValue("UninstallString", "\"" + Ejecutable + "\" --desinstalar");
+            k.SetValue("NoModify", 1, RegistryValueKind.DWord);
+            k.SetValue("NoRepair", 1, RegistryValueKind.DWord);
+            k.SetValue("EstimatedSize", Math.Max(1, programa.Length / 1024), RegistryValueKind.DWord);
+        }
+    }
+
+    // Borra todo lo que dejó el instalador, más las opciones guardadas.
+    public static void Desinstalar()
+    {
+        CerrarCopiaAbierta();
+        try { Config.CambiarInicio(false); } catch { }
+        Borrar(AccesoMenu);
+        Borrar(AccesoEscritorio);
+        try { Registry.CurrentUser.DeleteSubKeyTree(CLAVE_DESINSTALAR, false); } catch { }
+        try { Registry.CurrentUser.DeleteSubKeyTree(Config.CLAVE, false); } catch { }
+
+        // El .exe que está corriendo no se puede borrar a sí mismo: lo borra cmd unos segundos después.
+        string exe = Application.ExecutablePath;
+        if (string.Equals(System.IO.Path.GetDirectoryName(exe), Carpeta, StringComparison.OrdinalIgnoreCase))
+        {
+            var info = new System.Diagnostics.ProcessStartInfo("cmd.exe",
+                "/c ping 127.0.0.1 -n 3 > nul & del /f /q \"" + exe + "\" & rmdir \"" + Carpeta + "\"");
+            info.CreateNoWindow = true;
+            info.UseShellExecute = false;
+            info.WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden;
+            System.Diagnostics.Process.Start(info);
+        }
+    }
+
+    // Crea un acceso directo (.lnk) a Brillo.exe con el objeto COM WScript.Shell (sin referencias extra).
+    static void CrearAcceso(string ruta)
+    {
+        Type tipo = Type.GetTypeFromProgID("WScript.Shell");
+        object shell = Activator.CreateInstance(tipo);
+        try
+        {
+            object acceso = tipo.InvokeMember("CreateShortcut", System.Reflection.BindingFlags.InvokeMethod, null, shell, new object[] { ruta });
+            Type t = acceso.GetType();
+            const System.Reflection.BindingFlags PONER = System.Reflection.BindingFlags.SetProperty;
+            t.InvokeMember("TargetPath", PONER, null, acceso, new object[] { Ejecutable });
+            t.InvokeMember("WorkingDirectory", PONER, null, acceso, new object[] { Carpeta });
+            t.InvokeMember("Description", PONER, null, acceso, new object[] { "Ajustá el brillo de tus pantallas" });
+            t.InvokeMember("IconLocation", PONER, null, acceso, new object[] { Ejecutable + ",0" });
+            t.InvokeMember("Save", System.Reflection.BindingFlags.InvokeMethod, null, acceso, null);
+            Marshal.FinalReleaseComObject(acceso);
+        }
+        finally { Marshal.FinalReleaseComObject(shell); }
+    }
+
+    static void Borrar(string ruta)
+    {
+        try { if (System.IO.File.Exists(ruta)) System.IO.File.Delete(ruta); } catch { }
+    }
+}
+
+#if TIENDA
+// Versión de la Microsoft Store (paquete MSIX, ver tienda\AppxManifest.xml). Dentro del paquete el registro
+// "Run" no sirve para arrancar con Windows: se usa la tarea de inicio "BrilloInicio" declarada en el manifiesto.
+// Los tipos de Windows van con el nombre completo: un "using Windows.Foundation" chocaría con Point y Size de System.Drawing.
+static class Tienda
+{
+    const string TAREA = "BrilloInicio";
+
+    // Espera una operación asíncrona de Windows sin "await" (que con este compilador pediría el SDK).
+    static T Esperar<T>(Windows.Foundation.IAsyncOperation<T> op)
+    {
+        DateTime limite = DateTime.Now.AddSeconds(5);
+        while (op.Status == Windows.Foundation.AsyncStatus.Started && DateTime.Now < limite) Thread.Sleep(10);
+        return op.GetResults();
+    }
+
+    static Windows.ApplicationModel.StartupTask Tarea()
+    {
+        try { return Esperar(Windows.ApplicationModel.StartupTask.GetAsync(TAREA)); }
+        catch { return null; }
+    }
+
+    public static bool InicioActivado()
+    {
+        var t = Tarea();
+        return t != null && (t.State == Windows.ApplicationModel.StartupTaskState.Enabled ||
+                             t.State == Windows.ApplicationModel.StartupTaskState.EnabledByPolicy);
+    }
+
+    public static void CambiarInicio(bool activar)
+    {
+        var t = Tarea();
+        if (t == null) return;
+        if (!activar) { t.Disable(); return; }
+        var estado = Esperar(t.RequestEnableAsync());
+        // Si el usuario lo apagó desde el Administrador de tareas o Configuración, Windows no deja que el
+        // programa lo vuelva a prender: abrimos la página de aplicaciones de inicio para que lo haga ahí.
+        if (estado == Windows.ApplicationModel.StartupTaskState.DisabledByUser)
+            try { System.Diagnostics.Process.Start("ms-settings:startupapps"); } catch { }
+    }
+
+    // ¿Lo abrió Windows al iniciar sesión (y no el usuario)?
+    public static bool AbiertoAlIniciar()
+    {
+        try
+        {
+            var a = Windows.ApplicationModel.AppInstance.GetActivatedEventArgs();
+            return a != null && a.Kind == Windows.ApplicationModel.Activation.ActivationKind.StartupTask;
+        }
+        catch { return false; }
+    }
+}
+#endif
+
 static class Programa
 {
     [STAThread]
     static void Main(string[] args)
     {
+#if !TIENDA
+        if (Array.IndexOf(args, "--desinstalar") >= 0)
+        {
+            // Lo llama Windows desde "Aplicaciones instaladas".
+            Dpi.Iniciar();
+            Application.EnableVisualStyles();
+            if (MessageBox.Show("¿Querés desinstalar Brillo?\n\nSe borran el programa, sus accesos directos, " +
+                    "el inicio automático y las opciones guardadas.", "Desinstalar Brillo",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+            {
+                Instalacion.Desinstalar();
+                MessageBox.Show("Brillo se desinstaló.", "Brillo", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            return;
+        }
+#endif
+
         int fijo = -1;
         if (args.Length == 0 || !int.TryParse(args[0].TrimEnd('%'), out fijo)) fijo = -1;
 
@@ -2212,8 +2451,32 @@ static class Programa
         hilo.IsBackground = true;
         hilo.Start();
 
-        if (Array.IndexOf(args, "--oculto") < 0) ventana.Mostrar();
+        // El instalador y el desinstalador nos piden que nos cerremos antes de reemplazar o borrar el .exe.
+        var salir = new EventWaitHandle(false, EventResetMode.AutoReset, Instalacion.EVENTO_SALIR);
+        var hiloSalir = new Thread(delegate()
+        {
+            salir.WaitOne();
+            ventana.Invocar(ventana.Salir);
+        });
+        hiloSalir.IsBackground = true;
+        hiloSalir.Start();
+
+        bool oculto = Array.IndexOf(args, "--oculto") >= 0;
+#if TIENDA
+        // La tarea de inicio del paquete no pasa argumentos: preguntamos a Windows cómo nos abrió.
+        oculto = oculto || Tienda.AbiertoAlIniciar();
+        // La Store no deja preguntar nada al instalar, así que lo preguntamos la primera vez que se abre.
+        if (Config.PrimeraVez() && !oculto)
+        {
+            if (MessageBox.Show("¿Querés que Brillo se abra solo al iniciar Windows?\n\n" +
+                    "Queda como un icono junto al reloj. Lo podés cambiar cuando quieras en Configuración.",
+                    "Brillo", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+                Config.CambiarInicio(true);
+        }
+#endif
+        if (!oculto) ventana.Mostrar();
         Application.Run();
         GC.KeepAlive(senal);
+        GC.KeepAlive(salir);
     }
 }

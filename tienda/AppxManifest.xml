@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Manifiesto del paquete MSIX de Brillo para la Microsoft Store.
+  La identidad (Name, Publisher, PublisherDisplayName) es la que asignó el Centro de partners
+  en "Identidad del producto"; no cambiarla. Al publicar una versión nueva, subir Version
+  (el último número tiene que quedar en 0) y también Instalacion.VERSION en Brillo.cs.
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap desktop rescap">
+
+  <Identity
+    Name="FacuBas.Brillo"
+    Publisher="CN=1198724E-1989-4789-B583-362B177D4F8A"
+    Version="1.0.0.0"
+    ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>Brillo</DisplayName>
+    <PublisherDisplayName>FacuBas</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="es-AR" />
+  </Resources>
+
+  <Applications>
+    <Application Id="Brillo" Executable="Brillo.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="Brillo"
+        Description="Ajustá el brillo de tus pantallas desde la barra de tareas"
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png" />
+
+      <Extensions>
+        <!-- Inicio automático: viene apagado; se prende si el usuario dice que sí la primera vez o en Configuración. -->
+        <desktop:Extension Category="windows.startupTask" Executable="Brillo.exe" EntryPoint="Windows.FullTrustApplication">
+          <desktop:StartupTask TaskId="BrilloInicio" Enabled="false" DisplayName="Brillo" />
+        </desktop:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <!-- Programa de escritorio común: necesita acceso completo para hablar con los monitores (DDC/CI y WMI). -->
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+</Package>
