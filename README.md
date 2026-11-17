@@ -63,6 +63,8 @@ Al abrirlo aparece un icono en el área de notificación (junto al reloj).
 - **Clic izquierdo** en el icono o el atajo: abre o cierra la ventana del brillo.
 - **Clic derecho**: menú con *Configuración*, *Iniciar con Windows* y *Salir*.
 
+Cada pantalla aparece con su nombre (por ejemplo *LG ULTRAGEAR* o *Pantalla de la laptop*; se puede ocultar en *Configuración*) y, dentro del icono, el mismo número que le pone Windows en *Configuración > Sistema > Pantalla* (el de *Identificar*); las filas van en ese orden. Si cambiás el brillo con los botones del monitor o con las teclas de la laptop mientras la ventana está abierta, se actualiza sola.
+
 En la ventana:
 
 | Tecla | Acción |
@@ -74,7 +76,7 @@ En la ventana:
 | Tab | Pasa a la pantalla siguiente |
 | Esc | Cierra |
 
-En *Configuración* se elige el atajo, el paso, el tema, si se muestra el control "Todas las pantallas" y si arranca con Windows.
+En *Configuración* se elige el atajo, el paso, el tema, si se muestra el control "Todas las pantallas", si se muestran los nombres de las pantallas y si arranca con Windows.
 
 ### Desde la línea de comandos
 

@@ -125,6 +125,68 @@ static class Native
 
     [DllImport("dxva2.dll")]
     public static extern bool DestroyPhysicalMonitor(IntPtr hMonitor);
+
+    // ---------- Configuración de pantallas (para saber el número que les pone Windows) ----------
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct LUID { public uint Low; public int High; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct DISPLAYCONFIG_PATH_SOURCE_INFO { public LUID adapterId; public uint id, modeInfoIdx, statusFlags; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct DISPLAYCONFIG_PATH_TARGET_INFO
+    {
+        public LUID adapterId;
+        public uint id, modeInfoIdx, outputTechnology, rotation, scaling, refreshNum, refreshDen, scanLineOrdering;
+        public int targetAvailable;
+        public uint statusFlags;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct DISPLAYCONFIG_PATH_INFO { public DISPLAYCONFIG_PATH_SOURCE_INFO sourceInfo; public DISPLAYCONFIG_PATH_TARGET_INFO targetInfo; public uint flags; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct DISPLAYCONFIG_MODE_INFO
+    {
+        public uint infoType, id;
+        public LUID adapterId;
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 48)] public byte[] datos;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct DISPLAYCONFIG_DEVICE_INFO_HEADER { public uint type, size; public LUID adapterId; public uint id; }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct DISPLAYCONFIG_TARGET_DEVICE_NAME
+    {
+        public DISPLAYCONFIG_DEVICE_INFO_HEADER header;
+        public uint flags, outputTechnology;
+        public ushort edidManufactureId, edidProductCodeId;
+        public uint connectorInstance;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 64)] public string monitorFriendlyDeviceName;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string monitorDevicePath;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct DISPLAYCONFIG_ADAPTER_NAME
+    {
+        public DISPLAYCONFIG_DEVICE_INFO_HEADER header;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string adapterDevicePath;
+    }
+
+    [DllImport("user32.dll")]
+    public static extern int GetDisplayConfigBufferSizes(uint flags, out uint caminos, out uint modos);
+
+    [DllImport("user32.dll")]
+    public static extern int QueryDisplayConfig(uint flags, ref uint nCaminos, [Out] DISPLAYCONFIG_PATH_INFO[] caminos,
+                                                ref uint nModos, [Out] DISPLAYCONFIG_MODE_INFO[] modos, IntPtr topologia);
+
+    [DllImport("user32.dll")]
+    public static extern int DisplayConfigGetDeviceInfo(ref DISPLAYCONFIG_TARGET_DEVICE_NAME info);
+
+    [DllImport("user32.dll")]
+    public static extern int DisplayConfigGetDeviceInfo(ref DISPLAYCONFIG_ADAPTER_NAME info);
 }
 
 // Manejo de DPI. El proceso es "por monitor" para que la ventana del brillo se vea nítida en las dos
@@ -183,6 +245,8 @@ abstract class Pantalla
 {
     public string Nombre;
     public string Clave;                // identifica la pantalla entre una detección y la siguiente
+    public string Dispositivo;          // "DISPLAY\GSM5C89\5&2f15793d&0&UID4354" (o el InstanceName de WMI)
+    public int Numero;                  // el de Configuración > Pantalla de Windows (0 si no se sabe)
     public bool EsLaptop;
     public volatile int Deseado = -1;   // lo que pidió el usuario (lo escribe la interfaz)
     public int Aplicado = -1;           // lo último que se escribió o leyó (solo lo toca el hilo de trabajo)
@@ -196,13 +260,150 @@ abstract class Pantalla
     {
         var laptop = PantallaWmi.Detectar();
         string instanciaLaptop = laptop.Count > 0 ? ((PantallaWmi)laptop[0]).Instancia : null;
-        var lista = PantallaDdc.Detectar(instanciaLaptop, laptop.Count > 0, avisos);
-        lista.AddRange(laptop);
+        var detectadas = PantallaDdc.Detectar(instanciaLaptop, laptop.Count > 0, avisos);
+        detectadas.AddRange(laptop);
+
+        // Les ponemos el número de Windows y las ordenamos igual (las que no tienen número van al final).
+        var orden = NumerosWindows.Orden();
+        foreach (var p in detectadas) p.Numero = NumerosWindows.Buscar(orden, p.Dispositivo);
+        var lista = new List<Pantalla>();
+        foreach (var p in detectadas)
+        {
+            int k = lista.Count;
+            while (k > 0 && Posicion(lista[k - 1]) > Posicion(p)) k--;
+            lista.Insert(k, p);
+        }
+
+        // Si hay dos con el mismo nombre y no tienen número que las distinga, las numeramos nosotros.
+        for (int i = 0; i < lista.Count; i++)
+        {
+            int iguales = 0, nro = 0;
+            bool sinNumero = false;
+            for (int k = 0; k < lista.Count; k++)
+                if (lista[k].Nombre == lista[i].Nombre) { iguales++; if (k <= i) nro++; if (lista[k].Numero == 0) sinNumero = true; }
+            if (iguales > 1 && sinNumero) lista[i].Nombre += " " + nro;
+        }
 
         if (avisos != null && SystemInformation.TerminalServerSession)
             avisos.Insert(0, new Aviso("Sesión de Escritorio remoto",
                 "Estás usando esta PC por Escritorio remoto, y desde ahí Windows no deja cambiar el brillo de sus pantallas."));
         return lista;
+    }
+
+    static int Posicion(Pantalla p) { return p.Numero > 0 ? p.Numero : int.MaxValue; }
+}
+
+// Los números que Windows les pone a las pantallas en Configuración > Pantalla (los de "Identificar").
+// Windows no tiene una función que los dé, así que imitamos su criterio (el mismo que usa el módulo
+// DisplayConfig de PowerShell): por placa de video, después por tipo de conexión (interna, DisplayPort
+// de la laptop, DVI, DisplayPort, HDMI, el resto) y por número de conector. Cuenta también las pantallas
+// conectadas pero desactivadas, como Windows.
+static class NumerosWindows
+{
+    const uint QDC_ALL_PATHS = 1;
+
+    class Candidato { public string Adaptador, Id; public long Prioridad; public int Indice; }
+
+    // Devuelve los identificadores ("DISPLAY\GSM5C89\5&2f15793d&0&UID4354") en el orden de Windows:
+    // el primero es la pantalla 1. Si algo falla, devuelve una lista vacía.
+    public static List<string> Orden()
+    {
+        var r = new List<string>();
+        try
+        {
+            uint np = 0, nm = 0;
+            Native.DISPLAYCONFIG_PATH_INFO[] caminos = null;
+            int error = -1;
+            for (int intento = 0; intento < 3; intento++)
+            {
+                if (Native.GetDisplayConfigBufferSizes(QDC_ALL_PATHS, out np, out nm) != 0) return r;
+                caminos = new Native.DISPLAYCONFIG_PATH_INFO[np];
+                var modos = new Native.DISPLAYCONFIG_MODE_INFO[nm];
+                error = Native.QueryDisplayConfig(QDC_ALL_PATHS, ref np, caminos, ref nm, modos, IntPtr.Zero);
+                if (error != 122) break; // ERROR_INSUFFICIENT_BUFFER: cambió algo entre las dos llamadas
+            }
+            if (error != 0) return r;
+
+            var vistos = new List<string>();
+            var adaptadores = new Dictionary<string, string>();
+            var lista = new List<Candidato>();
+            for (int i = 0; i < np; i++)
+            {
+                var t = caminos[i].targetInfo;
+                if (t.targetAvailable == 0) continue;
+                string clave = t.adapterId.Low + ":" + t.adapterId.High + ":" + t.id;
+                if (vistos.Contains(clave)) continue;   // hay un camino por cada combinación posible
+                vistos.Add(clave);
+
+                var nombre = new Native.DISPLAYCONFIG_TARGET_DEVICE_NAME();
+                nombre.header.type = 2; // DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME
+                nombre.header.size = (uint)Marshal.SizeOf(typeof(Native.DISPLAYCONFIG_TARGET_DEVICE_NAME));
+                nombre.header.adapterId = t.adapterId;
+                nombre.header.id = t.id;
+                bool conNombre = Native.DisplayConfigGetDeviceInfo(ref nombre) == 0;
+
+                string luid = t.adapterId.Low + ":" + t.adapterId.High;
+                string adaptador;
+                if (!adaptadores.TryGetValue(luid, out adaptador))
+                {
+                    var a = new Native.DISPLAYCONFIG_ADAPTER_NAME();
+                    a.header.type = 4; // DISPLAYCONFIG_DEVICE_INFO_GET_ADAPTER_NAME
+                    a.header.size = (uint)Marshal.SizeOf(typeof(Native.DISPLAYCONFIG_ADAPTER_NAME));
+                    a.header.adapterId = t.adapterId;
+                    adaptador = Native.DisplayConfigGetDeviceInfo(ref a) == 0 && a.adapterDevicePath != null ? a.adapterDevicePath : luid;
+                    adaptadores[luid] = adaptador;
+                }
+
+                long prioridad;
+                switch (t.outputTechnology)
+                {
+                    case 0x80000000: prioridad = 50; break;  // interna
+                    case 11: prioridad = 100; break;         // DisplayPort de la laptop
+                    case 4: prioridad = 150; break;          // DVI
+                    case 10: prioridad = 200; break;         // DisplayPort
+                    case 5: prioridad = 250; break;          // HDMI
+                    default: prioridad = 300; break;
+                }
+                if (conNombre) prioridad += nombre.connectorInstance;
+
+                lista.Add(new Candidato {
+                    Adaptador = adaptador, Prioridad = prioridad, Indice = i,
+                    Id = conNombre ? IdDeRuta(nombre.monitorDevicePath) : null });
+            }
+
+            lista.Sort(delegate(Candidato a, Candidato b)
+            {
+                int c = string.Compare(a.Adaptador, b.Adaptador, StringComparison.CurrentCulture);
+                if (c == 0) c = a.Prioridad.CompareTo(b.Prioridad);
+                if (c == 0) c = a.Indice.CompareTo(b.Indice);
+                return c;
+            });
+            foreach (var c in lista) r.Add(c.Id);
+        }
+        catch { r.Clear(); }
+        return r;
+    }
+
+    // Número (1, 2, ...) de la pantalla con ese identificador, o 0 si no está.
+    public static int Buscar(List<string> orden, string dispositivo)
+    {
+        if (string.IsNullOrEmpty(dispositivo)) return 0;
+        for (int i = 0; i < orden.Count; i++)
+            if (orden[i] != null && (string.Equals(dispositivo, orden[i], StringComparison.OrdinalIgnoreCase) ||
+                                     dispositivo.StartsWith(orden[i] + "_", StringComparison.OrdinalIgnoreCase)))
+                return i + 1;
+        return 0;
+    }
+
+    // "\\?\DISPLAY#GSM5C89#5&2f15793d&0&UID4354#{e6f0...}" -> "DISPLAY\GSM5C89\5&2f15793d&0&UID4354",
+    // que es el comienzo del InstanceName de las clases de WMI.
+    public static string IdDeRuta(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return null;
+        if (s.StartsWith(@"\\?\")) s = s.Substring(4);
+        int llave = s.LastIndexOf("#{");
+        if (llave > 0) s = s.Substring(0, llave);
+        return s.Replace('#', '\\');
     }
 }
 
@@ -298,36 +499,23 @@ class PantallaDdc : Pantalla
 
                 p.Nombre = d != null && d.Nombre != "" ? d.Nombre : "Monitor externo";
                 p.Clave = "ddc|" + (id ?? (adaptador + "|" + j));
+                p.Dispositivo = id;
                 p.Aplicado = v;
                 p.Deseado = v;
                 lista.Add(p);
             }
         }
-
-        // Si hay dos monitores con el mismo nombre, los numeramos.
-        for (int i = 0; i < lista.Count; i++)
-        {
-            int iguales = 0, orden = 0;
-            for (int k = 0; k < lista.Count; k++)
-                if (lista[k].Nombre == lista[i].Nombre) { iguales++; if (k <= i) orden++; }
-            if (iguales > 1) lista[i].Nombre += " " + orden;
-        }
         return lista;
     }
 
-    // "\\?\DISPLAY#GSM5C89#5&2f15793d&0&UID4354#{e6f0...}" -> "DISPLAY\GSM5C89\5&2f15793d&0&UID4354",
-    // que es el comienzo del InstanceName de WmiMonitorID.
+    // Identificador del monitor ("DISPLAY\GSM5C89\5&2f15793d&0&UID4354"), que es el comienzo del InstanceName de WmiMonitorID.
     static string IdDispositivo(string adaptador, int indice)
     {
         var dd = new Native.DISPLAY_DEVICE();
         dd.cb = Marshal.SizeOf(typeof(Native.DISPLAY_DEVICE));
         if (!Native.EnumDisplayDevices(adaptador, (uint)indice, ref dd, 1) || string.IsNullOrEmpty(dd.DeviceID))
             return null;
-        string s = dd.DeviceID;
-        if (s.StartsWith(@"\\?\")) s = s.Substring(4);
-        int llave = s.LastIndexOf("#{");
-        if (llave > 0) s = s.Substring(0, llave);
-        return s.Replace('#', '\\');
+        return NumerosWindows.IdDeRuta(dd.DeviceID);
     }
 
     // Nombre real y tipo de conexión de cada monitor conectado.
@@ -480,7 +668,7 @@ class PantallaWmi : Pantalla
             using (var s = new ManagementObjectSearcher("root\\WMI", "SELECT InstanceName, CurrentBrightness FROM WmiMonitorBrightness"))
                 foreach (ManagementObject o in s.Get())
                 {
-                    p.Instancia = o["InstanceName"] as string;
+                    p.Instancia = p.Dispositivo = o["InstanceName"] as string;
                     int v = Convert.ToInt32(o["CurrentBrightness"]);
                     p.Aplicado = v;
                     p.Deseado = v;
@@ -524,6 +712,43 @@ class Trabajador
 
     // Vuelve a buscar las pantallas (por si se conectó o reconectó alguna) y relee el brillo.
     public void Redetectar() { Encolar(DetectarAhora); }
+
+    // Relee solo el brillo de las pantallas que ya conocemos (por si se cambió con los botones del monitor
+    // o con las teclas de la laptop) y avisa con PantallasCambiadas si algo cambió.
+    public void Releer()
+    {
+        if (Interlocked.Exchange(ref releyendo, 1) == 1) return; // ya hay una en la cola
+        Encolar(ReleerAhora);
+    }
+
+    int releyendo;
+    DateTime ultimaEscritura = DateTime.MinValue;
+
+    void ReleerAhora()
+    {
+        try
+        {
+            // Justo después de escribir, algunos monitores todavía informan el valor anterior.
+            if ((DateTime.Now - ultimaEscritura).TotalMilliseconds < 1500) return;
+            bool cambio = false;
+            foreach (var p in pantallas)
+            {
+                int aplicado = p.Aplicado;
+                if (p.Deseado != aplicado) continue;   // hay un cambio del usuario por escribir
+                int v = p.Leer();
+                if (v < 0 || v == aplicado) continue;
+                // Si el usuario lo movió mientras leíamos, gana el usuario.
+#pragma warning disable 420
+                if (Interlocked.CompareExchange(ref p.Deseado, v, aplicado) != aplicado) continue;
+#pragma warning restore 420
+                p.Aplicado = v;
+                cambio = true;
+            }
+            var avisar = PantallasCambiadas;
+            if (cambio && avisar != null) avisar(new List<Pantalla>(pantallas), new List<Aviso>(avisos));
+        }
+        finally { releyendo = 0; }
+    }
 
     public List<Pantalla> DetectarYEsperar(out List<Aviso> avisosEncontrados)
     {
@@ -586,6 +811,7 @@ class Trabajador
             int d = p.Deseado;
             if (d < 0 || d == p.Aplicado) continue;
             escribio = true;
+            ultimaEscritura = DateTime.Now;
             if (p.Escribir(d)) { p.Aplicado = d; continue; }
 
             // No respondió: puede que el monitor se haya reconectado. Lo buscamos de nuevo
@@ -609,7 +835,8 @@ class Config
     public int AtajoTecla = (int)Keys.B;
     public int Paso = 5;
     public bool Maestro = true;   // mostrar un deslizador para todas las pantallas a la vez
-    public int Tema = 0;          // 0 = como Windows, 1 = oscuro, 2 = claro
+    public bool Nombres = true;   // mostrar el nombre de cada pantalla arriba de su deslizador
+    public int Tema = 0;         // 0 = como Windows, 1 = oscuro, 2 = claro
 
     public Config Copiar() { return (Config)MemberwiseClone(); }
 
@@ -657,6 +884,7 @@ class Config
                     c.AtajoTecla = LeerEntero(k, "AtajoTecla", c.AtajoTecla);
                     c.Paso = LeerEntero(k, "Paso", c.Paso);
                     c.Maestro = LeerEntero(k, "Maestro", 1) != 0;
+                    c.Nombres = LeerEntero(k, "Nombres", 1) != 0;
                     c.Tema = LeerEntero(k, "Tema", c.Tema);
                 }
         }
@@ -682,6 +910,7 @@ class Config
                 k.SetValue("AtajoTecla", AtajoTecla, RegistryValueKind.DWord);
                 k.SetValue("Paso", Paso, RegistryValueKind.DWord);
                 k.SetValue("Maestro", Maestro ? 1 : 0, RegistryValueKind.DWord);
+                k.SetValue("Nombres", Nombres ? 1 : 0, RegistryValueKind.DWord);
                 k.SetValue("Tema", Tema, RegistryValueKind.DWord);
             }
         }
@@ -775,7 +1004,7 @@ class Config
 class Tema
 {
     public bool Oscuro;
-    public Color Fondo, Cabecera, Texto, TextoCabecera, Pista, Acento, AcentoActivo, Borde, Burbuja, Foco, Resalte, Menu, MenuElegido;
+    public Color Fondo, Cabecera, Texto, TextoCabecera, Pista, Acento, AcentoActivo, Borde, Foco, Resalte, Menu, MenuElegido;
     public Color TextoSuave, Tarjeta, BordeTarjeta, Control, ControlHover, BordeControl, Error, Aviso, SobreAcento, HoverCabecera;
 
     public static Tema Actual(int preferencia)
@@ -794,7 +1023,6 @@ class Tema
             t.Pista = Color.FromArgb(100, 255, 255, 255);
             t.AcentoActivo = Mezclar(acento, Color.White, 0.75);
             t.Borde = Color.FromArgb(60, 60, 60);
-            t.Burbuja = Color.FromArgb(48, 48, 48);
             t.Foco = Color.FromArgb(200, 255, 255, 255);
             t.Resalte = Color.FromArgb(40, 255, 255, 255);
             t.Menu = Color.FromArgb(43, 43, 43);
@@ -818,7 +1046,6 @@ class Tema
             t.Pista = Color.FromArgb(110, 0, 0, 0);
             t.AcentoActivo = Mezclar(acento, Color.Black, 0.8);
             t.Borde = Color.FromArgb(205, 205, 205);
-            t.Burbuja = Color.White;
             t.Foco = Color.FromArgb(200, 0, 0, 0);
             t.Resalte = Color.FromArgb(30, 0, 0, 0);
             t.Menu = Color.FromArgb(249, 249, 249);
@@ -1134,13 +1361,13 @@ class Ventana : Flotante
     readonly PanelConfig panel;
     Config config;
     List<Fila> filas = new List<Fila>();
-    Fila arrastrando, sobreDeslizador, sobreIcono;
+    Fila arrastrando, sobreDeslizador;
     int foco;
     bool focoVisible, sobreAjustes, apretoAjustes, atajoRegistrado;
     int acumuladoRueda;
     int altoCabecera;
     Rectangle rAjustes, rMensaje;
-    Font fTitulo, fValorGrande, fValor, fIconoGrande, fIcono, fAjustes, fBurbuja, fMensaje, fAvisoTitulo, fGlifoAviso, fFlecha;
+    Font fTitulo, fValorGrande, fValor, fIconoGrande, fIcono, fAjustes, fChico, fMensaje, fAvisoTitulo, fGlifoAviso, fFlecha, fNumero, fIconoLaptop;
 
     // Pantallas que se ven pero no se pueden ajustar. Con pantallas para ajustar, se muestran como una
     // línea al pie que se despliega con un clic; sin ninguna, se muestran directamente.
@@ -1154,6 +1381,9 @@ class Ventana : Flotante
     NotifyIcon icono;
     ContextMenuStrip menu;
     ToolStripMenuItem itemInicio;
+
+    // Mientras la ventana está abierta, relee el brillo cada tanto por si se cambia desde el monitor.
+    readonly System.Windows.Forms.Timer relectura = new System.Windows.Forms.Timer();
 
     public Ventana(Trabajador trabajador, List<Pantalla> pantallas, List<Aviso> avisosIniciales, Config cfg)
     {
@@ -1173,6 +1403,9 @@ class Ventana : Flotante
         SystemEvents.DisplaySettingsChanged += delegate { Invocar(delegate { if (Visible) trabajador.Redetectar(); }); };
         // Si se pasa la barra de tareas de oscura a clara (o al revés), el icono cambia de color.
         SystemEvents.UserPreferenceChanged += delegate { Invocar(ActualizarIconoBandeja); };
+
+        relectura.Interval = 1000;
+        relectura.Tick += delegate { if (Visible && arrastrando == null) trabajador.Releer(); };
 
         // El icono y su menú se crean en modo "DPI del sistema" para que Windows los escale solo.
         Dpi.ComoSistema(CrearIcono);
@@ -1216,10 +1449,12 @@ class Ventana : Flotante
         acumuladoRueda = 0;
         // Relee el brillo (y las pantallas), por si se cambió con el botón del monitor o se conectó otra.
         trabajador.Redetectar();
+        relectura.Start();
     }
 
     protected override void AlOcultar()
     {
+        relectura.Stop();
         arrastrando = null;
         Capture = false;
         ActualizarTextoIcono();
@@ -1268,7 +1503,8 @@ class Ventana : Flotante
         if (icono == null) return;
         string s = "Brillo";
         foreach (var f in filas)
-            if (f.Pantalla != null) s += "\n" + f.Nombre + ": " + f.Valor + " %";
+            if (f.Pantalla != null)
+                s += "\n" + (f.Pantalla.Numero > 0 ? f.Pantalla.Numero + ". " : "") + f.Nombre + ": " + f.Valor + " %";
         if (s.Length > 63) s = s.Substring(0, 62) + "…";
         try { icono.Text = s; } catch { }
     }
@@ -1321,10 +1557,12 @@ class Ventana : Flotante
     void AplicarConfig(Config nueva)
     {
         bool cambioMaestro = nueva.Maestro != config.Maestro;
+        bool cambioNombres = nueva.Nombres != config.Nombres;
         config = nueva;
         config.Guardar();
         tema = Tema.Actual(config.Tema);
-        if (cambioMaestro) { ArmarFilas(PantallasActuales()); Distribuir(); }
+        if (cambioMaestro) ArmarFilas(PantallasActuales());
+        if (cambioMaestro || cambioNombres) Distribuir();
         Invalidate();
     }
 
@@ -1373,7 +1611,7 @@ class Ventana : Flotante
 
     void ArmarFilas(List<Pantalla> pantallas)
     {
-        arrastrando = sobreDeslizador = sobreIcono = null;
+        arrastrando = sobreDeslizador = null;
         Capture = false;
         filas = new List<Fila>();
         if (pantallas.Count == 1)
@@ -1437,7 +1675,7 @@ class Ventana : Flotante
 
     protected override void Distribuir()
     {
-        foreach (var f in new[] { fTitulo, fValorGrande, fValor, fIconoGrande, fIcono, fAjustes, fBurbuja, fMensaje, fAvisoTitulo, fGlifoAviso, fFlecha })
+        foreach (var f in new[] { fTitulo, fValorGrande, fValor, fIconoGrande, fIcono, fAjustes, fChico, fMensaje, fAvisoTitulo, fGlifoAviso, fFlecha, fNumero, fIconoLaptop })
             if (f != null) f.Dispose();
         fTitulo = Fuente("Segoe UI", 14);
         fValorGrande = Fuente("Segoe UI", 26);
@@ -1445,11 +1683,13 @@ class Ventana : Flotante
         fIconoGrande = Fuente(fuenteIconos, 22);
         fIcono = Fuente(fuenteIconos, 22);
         fAjustes = Fuente(fuenteIconos, 15);
-        fBurbuja = Fuente("Segoe UI", 13);
+        fChico = Fuente("Segoe UI", 13);
         fMensaje = Fuente("Segoe UI", 14);
         fAvisoTitulo = Fuente(ExisteFuente("Segoe UI Semibold") ? "Segoe UI Semibold" : "Segoe UI", 14);
         fGlifoAviso = Fuente(fuenteIconos, 18);
         fFlecha = Fuente(fuenteIconos, 12);
+        fNumero = Fuente(ExisteFuente("Segoe UI Semibold") ? "Segoe UI Semibold" : "Segoe UI", 10);
+        fIconoLaptop = Fuente(fuenteIconos, 28);   // el dibujo de la laptop es más chico: lo agrandamos para que entre el número
 
         int ancho = E(368);
         int y;
@@ -1478,11 +1718,16 @@ class Ventana : Flotante
             if (filas.Count > 1)
             {
                 y += E(6);
+                // Con los nombres (opcional), cada uno va arriba de su deslizador y la fila es más alta.
+                int alto = config.Nombres ? E(58) : E(46);
                 for (int i = 1; i < filas.Count; i++)
                 {
-                    filas[i].Area = new Rectangle(0, y, ancho, E(46));
-                    UbicarFila(filas[i], y + E(23), ancho);
-                    y += E(46);
+                    var f = filas[i];
+                    f.Area = new Rectangle(0, y, ancho, alto);
+                    UbicarFila(f, config.Nombres ? y + E(38) : y + alto / 2, ancho);
+                    f.Titulo = config.Nombres ? Rectangle.FromLTRB(f.Pista.Left, y + E(8), f.Pista.Right, y + E(26)) : Rectangle.Empty;
+                    f.Icono.Y = y + (alto - f.Icono.Height) / 2;
+                    y += alto;
                 }
                 y += E(6);
             }
@@ -1519,8 +1764,8 @@ class Ventana : Flotante
                                        : TextRenderer.MeasureText(a.Titulo, fAvisoTitulo, limite, flags);
                     rAvisoTitulo.Add(new Rectangle(izquierda, y, anchoTexto, t.Height));
                     y += t.Height + E(2);
-                    Size d = g != null ? TextRenderer.MeasureText(g, a.Detalle, fBurbuja, limite, flags)
-                                       : TextRenderer.MeasureText(a.Detalle, fBurbuja, limite, flags);
+                    Size d = g != null ? TextRenderer.MeasureText(g, a.Detalle, fChico, limite, flags)
+                                       : TextRenderer.MeasureText(a.Detalle, fChico, limite, flags);
                     rAvisoDetalle.Add(new Rectangle(izquierda, y, anchoTexto, d.Height));
                     y += d.Height + E(14);
                 }
@@ -1592,7 +1837,6 @@ class Ventana : Flotante
         TextRenderer.DrawText(g, GLIFO_AJUSTES, fAjustes, rAjustes, tema.TextoCabecera, CENTRADO);
 
         DibujarAvisos(g);
-        if (sobreIcono != null && arrastrando == null) DibujarBurbuja(g, sobreIcono);
     }
 
     void DibujarAvisos(Graphics g)
@@ -1609,7 +1853,7 @@ class Ventana : Flotante
             if (!conFilas)
                 TextRenderer.DrawText(g, GLIFO_AVISO, fGlifoAviso, new Rectangle(E(16), rAvisoTitulo[i].Top - E(6), E(34), E(32)), tema.Aviso, CENTRADO);
             TextRenderer.DrawText(g, avisos[i].Titulo, fAvisoTitulo, rAvisoTitulo[i], tema.Texto, flags);
-            TextRenderer.DrawText(g, avisos[i].Detalle, fBurbuja, rAvisoDetalle[i], tema.TextoSuave, flags);
+            TextRenderer.DrawText(g, avisos[i].Detalle, fChico, rAvisoDetalle[i], tema.TextoSuave, flags);
         }
 
         if (!rAvisos.IsEmpty)
@@ -1629,9 +1873,18 @@ class Ventana : Flotante
         Color texto = f.Grande ? tema.TextoCabecera : tema.Texto;
 
         if (focoVisible && indice == foco)
-            Rellenar(g, Rectangle.FromLTRB(E(6), f.Centro - E(21), Width - E(6), f.Centro + E(21)), E(4), tema.Resalte);
+            Rellenar(g, f.Grande ? Rectangle.FromLTRB(E(6), f.Centro - E(21), Width - E(6), f.Centro + E(21))
+                                 : Rectangle.FromLTRB(E(6), f.Area.Top + E(2), Width - E(6), f.Area.Bottom - E(2)), E(4), tema.Resalte);
 
-        TextRenderer.DrawText(g, f.Glifo, f.Grande ? fIconoGrande : fIcono, f.Icono, texto, CENTRADO);
+        bool laptop = !f.Grande && f.Pantalla != null && f.Pantalla.EsLaptop;
+        TextRenderer.DrawText(g, f.Glifo, f.Grande ? fIconoGrande : laptop ? fIconoLaptop : fIcono, f.Icono, texto, CENTRADO);
+        // El número que le pone Windows (Configuración > Pantalla), dentro del dibujo de la pantalla,
+        // que está un poco más arriba del centro.
+        if (!f.Grande && f.Pantalla != null && f.Pantalla.Numero > 0)
+            TextRenderer.DrawText(g, f.Pantalla.Numero.ToString(), fNumero,
+                new Rectangle(f.Icono.X, f.Icono.Y - E(laptop ? 1 : 2), f.Icono.Width, f.Icono.Height), texto, CENTRADO);
+        if (!f.Grande && config.Nombres)
+            TextRenderer.DrawText(g, f.Nombre, fChico, f.Titulo, tema.TextoSuave, LINEA | TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
 
         int x = XDeValor(f, f.Valor);
         using (var b = new SolidBrush(tema.Pista)) g.FillRectangle(b, x, f.Pista.Top, f.Pista.Right - x, f.Pista.Height);
@@ -1641,18 +1894,6 @@ class Ventana : Flotante
         Rellenar(g, new RectangleF(x - E(4), f.Centro - E(12), E(8), E(24)), E(4), activa ? tema.AcentoActivo : tema.Acento);
 
         TextRenderer.DrawText(g, f.Valor.ToString(), f.Grande ? fValorGrande : fValor, f.Texto, texto, CENTRADO);
-    }
-
-    // Cartelito con el nombre de la pantalla al pasar el mouse por su icono.
-    void DibujarBurbuja(Graphics g, Fila f)
-    {
-        const TextFormatFlags flags = TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding;
-        Size t = TextRenderer.MeasureText(g, f.Nombre, fBurbuja, Size.Empty, flags);
-        var r = new Rectangle(f.Icono.Right + E(6), f.Centro - (t.Height + E(12)) / 2, t.Width + E(20), t.Height + E(12));
-        if (r.Right > Width - E(6)) r.X = Width - E(6) - r.Width;
-        Rellenar(g, r, E(4), tema.Burbuja);
-        Bordear(g, r, E(4), tema.Borde, 1);
-        TextRenderer.DrawText(g, f.Nombre, fBurbuja, new Point(r.X + E(10), r.Y + E(6)), tema.Texto, flags);
     }
 
     // ---------- Mouse y teclado ----------
@@ -1693,14 +1934,11 @@ class Ventana : Flotante
         if (arrastrando != null) { CambiarValor(arrastrando, ValorDeX(arrastrando, e.X)); return; }
 
         var deslizador = DeslizadorEn(e.Location);
-        Fila icono = null;
-        foreach (var f in filas) if (!f.Grande && f.TieneDeslizador && f.Icono.Contains(e.Location)) icono = f;
         bool ajustes = rAjustes.Contains(e.Location);
         bool enAvisos = rAvisos.Contains(e.Location);
-        if (deslizador != sobreDeslizador || icono != sobreIcono || ajustes != sobreAjustes || enAvisos != sobreAvisos)
+        if (deslizador != sobreDeslizador || ajustes != sobreAjustes || enAvisos != sobreAvisos)
         {
             sobreDeslizador = deslizador;
-            sobreIcono = icono;
             sobreAjustes = ajustes;
             sobreAvisos = enAvisos;
             Invalidate();
@@ -1725,7 +1963,7 @@ class Ventana : Flotante
     protected override void OnMouseLeave(EventArgs e)
     {
         base.OnMouseLeave(e);
-        sobreDeslizador = sobreIcono = null;
+        sobreDeslizador = null;
         sobreAjustes = sobreAvisos = false;
         Invalidate();
     }
@@ -1835,7 +2073,7 @@ class Ventana : Flotante
 class PanelConfig : Flotante
 {
     const string GLIFO_VOLVER = "", GLIFO_MENOS = "", GLIFO_MAS = "";
-    const int ATAJO = 0, PASO = 1, TEMA = 2, MAESTRO = 3, INICIO = 4, OPCIONES = 5;
+    const int ATAJO = 0, PASO = 1, TEMA = 2, MAESTRO = 3, NOMBRES = 4, INICIO = 5, OPCIONES = 6;
     static readonly string[] TEMAS = { "Windows", "Oscuro", "Claro" };
 
     readonly Action<Config> aplicar;
@@ -1848,7 +2086,7 @@ class PanelConfig : Flotante
     int foco;
 
     int altoCabecera;
-    Rectangle rVolver, rTitulo, rAtajo, rMenos, rMas, rPaso, rSegmentos, rMaestro, rInicio;
+    Rectangle rVolver, rTitulo, rAtajo, rMenos, rMas, rPaso, rSegmentos, rMaestro, rNombres, rInicio;
     readonly Rectangle[] tarjetas = new Rectangle[OPCIONES];
     readonly Rectangle[] rSegmento = new Rectangle[3];
     Font fTitulo, fTexto, fAyuda, fControl, fGlifo;
@@ -1921,6 +2159,7 @@ class PanelConfig : Flotante
         for (int k = 0; k < 3; k++)
             rSegmento[k] = new Rectangle(rSegmentos.Left + k * anchoSegmento, rSegmentos.Top, anchoSegmento, alto);
         rMaestro = new Rectangle(derecha - E(40), Medio(MAESTRO) - E(10), E(40), E(20));
+        rNombres = new Rectangle(derecha - E(40), Medio(NOMBRES) - E(10), E(40), E(20));
         rInicio = new Rectangle(derecha - E(40), Medio(INICIO) - E(10), E(40), E(20));
 
         Size = new Size(ancho, y + E(4));
@@ -1937,6 +2176,7 @@ class PanelConfig : Flotante
             case PASO: return Rectangle.FromLTRB(rMenos.Left, rMenos.Top, rMas.Right, rMas.Bottom);
             case TEMA: return rSegmentos;
             case MAESTRO: return rMaestro;
+            case NOMBRES: return rNombres;
             default: return rInicio;
         }
     }
@@ -1961,6 +2201,7 @@ class PanelConfig : Flotante
         Tarjeta(g, PASO, "Paso", "Rueda del mouse y flechas", false);
         Tarjeta(g, TEMA, "Tema", null, false);
         Tarjeta(g, MAESTRO, "Todas las pantallas", "Un control que las mueve juntas", false);
+        Tarjeta(g, NOMBRES, "Nombres de las pantallas", "Arriba de cada deslizador", false);
         Tarjeta(g, INICIO, "Iniciar con Windows", "Arranca solo con el icono", false);
 
         // Atajo
@@ -1989,6 +2230,7 @@ class PanelConfig : Flotante
         }
 
         Interruptor(g, rMaestro, config.Maestro, sobre == "maestro");
+        Interruptor(g, rNombres, config.Nombres, sobre == "nombres");
         Interruptor(g, rInicio, inicio, sobre == "inicio");
 
         if (focoVisible)
@@ -2055,6 +2297,7 @@ class PanelConfig : Flotante
         if (rMas.Contains(p)) return "mas";
         for (int k = 0; k < 3; k++) if (rSegmento[k].Contains(p)) return "tema" + k;
         if (tarjetas[MAESTRO].Contains(p)) return "maestro";   // como en Windows, toda la tarjeta prende y apaga
+        if (tarjetas[NOMBRES].Contains(p)) return "nombres";
         if (tarjetas[INICIO].Contains(p)) return "inicio";
         return null;
     }
@@ -2068,6 +2311,7 @@ class PanelConfig : Flotante
             case "menos": CambiarPaso(-1); foco = PASO; break;
             case "mas": CambiarPaso(1); foco = PASO; break;
             case "maestro": config.Maestro = !config.Maestro; foco = MAESTRO; Aplicar(); break;
+            case "nombres": config.Nombres = !config.Nombres; foco = NOMBRES; Aplicar(); break;
             case "inicio":
                 try { Config.CambiarInicio(!inicio); } catch { }
                 inicio = Config.InicioActivado();
@@ -2197,6 +2441,7 @@ class PanelConfig : Flotante
             case Keys.Space:
                 if (foco == ATAJO) { capturando = true; parcial = error = null; }
                 else if (foco == MAESTRO) Accion("maestro");
+                else if (foco == NOMBRES) Accion("nombres");
                 else if (foco == INICIO) Accion("inicio");
                 break;
             default: return base.ProcessCmdKey(ref msg, keyData);
