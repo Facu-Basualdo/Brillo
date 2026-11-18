@@ -15,7 +15,7 @@
   <Identity
     Name="FacuBas.Brillo"
     Publisher="CN=1198724E-1989-4789-B583-362B177D4F8A"
-    Version="1.0.0.0"
+    Version="1.1.0.0"
     ProcessorArchitecture="x64" />
 
   <Properties>

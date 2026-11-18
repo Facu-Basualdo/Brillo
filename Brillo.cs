@@ -2457,7 +2457,7 @@ class PanelConfig : Flotante
 // La usan el instalador (Instalador.cs) y "Brillo.exe --desinstalar".
 static class Instalacion
 {
-    public const string VERSION = "1.0.0";
+    public const string VERSION = "1.1.0";
     public const string EVENTO_SALIR = "Brillo_Salir";   // la copia abierta lo escucha y se cierra
     const string CLAVE_DESINSTALAR = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\Brillo";
 

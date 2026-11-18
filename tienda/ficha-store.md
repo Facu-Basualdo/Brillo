@@ -18,6 +18,8 @@ Si una pantalla no se puede ajustar, Brillo te dice por qué (por ejemplo, que D
 Pensado para usarlo rápido:
 • Rueda del mouse, flechas o números del 1 al 0 para ir de 10 % a 100 %.
 • Atajo de teclado global que podés cambiar.
+• Cada pantalla muestra el número que le da Windows y, si querés, su nombre.
+• Si cambiás el brillo con los botones del monitor o las teclas de la laptop, Brillo lo muestra al instante.
 • Opción de iniciar con Windows, oculto, con solo el icono junto al reloj.
 • Tema claro u oscuro, con el color de énfasis de Windows.
 • Se ve nítido aunque tus pantallas tengan distinta escala.
@@ -27,13 +29,25 @@ Liviano, sin publicidad, sin cuentas y sin conexión a internet: no junta ni env
 Para los monitores externos, DDC/CI tiene que estar activado en el menú del monitor (en muchos viene así de fábrica).
 ```
 
+## Novedades de esta versión (1.1.0)
+
+```
+• Cada pantalla muestra el número que le da Windows (el mismo de "Identificar" en Configuración > Pantalla).
+• Nueva opción para ver el nombre de cada pantalla arriba de su deslizador.
+• El brillo se actualiza en vivo si lo cambiás con los botones del monitor o las teclas de la laptop.
+```
+
 ## Características del producto
+
+Una por campo ("Agregar más" para sumar otra); no van en "Novedades de esta versión".
 
 ```
 Un deslizador por pantalla, más uno para mover todas a la vez
 Monitores externos por DDC/CI y pantalla de la laptop
 Se abre desde el icono junto al reloj o con un atajo de teclado
 Rueda del mouse, flechas y números para cambiar el brillo rápido
+Cada pantalla con el número que le da Windows y, si querés, su nombre
+El brillo se actualiza en vivo si lo cambiás desde el monitor o la laptop
 Avisos claros cuando una pantalla no se puede ajustar, con la causa y qué hacer
 Opción de iniciar con Windows
 Tema claro u oscuro con el color de énfasis de Windows
