@@ -2667,11 +2667,20 @@ static class Programa
             return;
         }
 
-        // Si ya hay una copia corriendo, le pedimos que se muestre y salimos.
+        bool oculto = Array.IndexOf(args, "--oculto") >= 0;
+#if TIENDA
+        // La tarea de inicio del paquete no pasa argumentos: preguntamos a Windows cómo nos abrió.
+        oculto = oculto || Tienda.AbiertoAlIniciar();
+#endif
+
+        // Si ya hay una copia corriendo, le pedimos que se muestre y salimos. Si a esta la abrió el inicio
+        // automático (por ejemplo, la versión de la Store y la otra arrancan las dos con Windows), salimos
+        // sin mostrar nada.
         bool nueva;
         var senal = new EventWaitHandle(false, EventResetMode.AutoReset, "Brillo_Mostrar", out nueva);
         if (!nueva)
         {
+            if (oculto) return;
             // Le damos permiso a la otra copia para ponerse al frente (si no, Windows se lo niega).
             try { Native.AllowSetForegroundWindow(-1); } catch { }
             senal.Set();
@@ -2706,10 +2715,7 @@ static class Programa
         hiloSalir.IsBackground = true;
         hiloSalir.Start();
 
-        bool oculto = Array.IndexOf(args, "--oculto") >= 0;
 #if TIENDA
-        // La tarea de inicio del paquete no pasa argumentos: preguntamos a Windows cómo nos abrió.
-        oculto = oculto || Tienda.AbiertoAlIniciar();
         // La Store no deja preguntar nada al instalar, así que lo preguntamos la primera vez que se abre.
         if (Config.PrimeraVez() && !oculto)
         {
